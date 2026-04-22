@@ -112,4 +112,26 @@ router.post('/:id/complete', authenticateToken, requireRole(['provider']), async
   }
 })
 
+// Get provider earnings
+router.get('/provider/earnings', authenticateToken, requireRole(['provider']), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.id, p.booking_id, p.amount, p.payment_date,
+              b.service_type,
+              u.name as patient_name
+       FROM payments p
+       JOIN bookings b ON p.booking_id = b.id
+       JOIN users u ON b.patient_id = u.id
+       WHERE b.assigned_provider_id = $1 AND p.status = 'paid'
+       ORDER BY p.payment_date DESC`,
+      [req.user.id]
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching provider earnings:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
 module.exports = router

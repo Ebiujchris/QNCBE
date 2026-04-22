@@ -32,6 +32,7 @@ CREATE TABLE bookings (
     urgency VARCHAR(20) DEFAULT 'normal' CHECK (urgency IN ('normal', 'urgent', 'emergency')),
     status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'assigned', 'paid', 'completed', 'cancelled')),
     assigned_provider_id INTEGER REFERENCES users(id),
+    price DECIMAL(10,2) DEFAULT 0.00,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

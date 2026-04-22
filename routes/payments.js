@@ -27,26 +27,24 @@ router.post('/:bookingId/mark-paid', authenticateToken, requireRole(['patient'])
       ['paid', bookingId]
     )
 
-    // Create or update payment record
+    // Update payment record with actual booking price
     await pool.query(
-      `INSERT INTO payments (booking_id, amount, status, payment_date) 
-       VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-       ON CONFLICT (booking_id) DO UPDATE SET 
-       status = $3, payment_date = CURRENT_TIMESTAMP`,
-      [bookingId, 100.00, 'paid'] // Default amount, can be made dynamic
+      `UPDATE payments SET status = $1, payment_date = CURRENT_TIMESTAMP 
+       WHERE booking_id = $2`,
+      ['paid', bookingId]
     )
 
     // Notify admin and provider
     await pool.query(
       `INSERT INTO notifications (user_id, message, type) 
        SELECT id, $1, 'payment_received' FROM users WHERE role = 'admin'`,
-      [`Payment received for booking #${bookingId}`]
+      [`Payment of UGX ${parseFloat(booking.price).toLocaleString()} received for booking #${bookingId}`]
     )
 
     if (booking.assigned_provider_id) {
       await pool.query(
         'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
-        [booking.assigned_provider_id, `Payment confirmed for your assigned service`, 'payment_received']
+        [booking.assigned_provider_id, `Payment of UGX ${parseFloat(booking.price).toLocaleString()} confirmed for your assigned service`, 'payment_received']
       )
     }
 

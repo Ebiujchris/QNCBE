@@ -88,12 +88,16 @@ router.get('/providers', authenticateToken, requireRole(['admin']), async (req, 
 router.post('/bookings/:id/assign', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const bookingId = req.params.id
-    const { providerId } = req.body
+    const { providerId, price } = req.body
 
-    // Update booking
+    if (!providerId || !price || price <= 0) {
+      return res.status(400).json({ message: 'Provider ID and valid price are required' })
+    }
+
+    // Update booking with provider and price
     const result = await pool.query(
-      'UPDATE bookings SET assigned_provider_id = $1, status = $2 WHERE id = $3 RETURNING *',
-      [providerId, 'assigned', bookingId]
+      'UPDATE bookings SET assigned_provider_id = $1, price = $2, status = $3 WHERE id = $4 RETURNING *',
+      [providerId, price, 'assigned', bookingId]
     )
 
     if (result.rows.length === 0) {
@@ -102,16 +106,22 @@ router.post('/bookings/:id/assign', authenticateToken, requireRole(['admin']), a
 
     const booking = result.rows[0]
 
+    // Create payment record
+    await pool.query(
+      'INSERT INTO payments (booking_id, amount, status) VALUES ($1, $2, $3)',
+      [bookingId, price, 'unpaid']
+    )
+
     // Notify patient
     await pool.query(
       'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
-      [booking.patient_id, `A provider has been assigned to your ${booking.service_type} service request`, 'provider_assigned']
+      [booking.patient_id, `A provider has been assigned to your ${booking.service_type} service request. Service fee: UGX ${parseFloat(price).toLocaleString()}`, 'provider_assigned']
     )
 
     // Notify provider
     await pool.query(
       'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
-      [providerId, `You have been assigned a new ${booking.service_type} service`, 'assignment_received']
+      [providerId, `You have been assigned a new ${booking.service_type} service. Fee: UGX ${parseFloat(price).toLocaleString()}`, 'assignment_received']
     )
 
     res.json(booking)
@@ -149,7 +159,7 @@ router.get('/stats', authenticateToken, requireRole(['admin']), async (req, res)
       return acc
     }, {})
 
-    // Total payments
+    // Total payments and revenue
     const paymentStats = await pool.query(
       'SELECT COUNT(*) as total, SUM(amount) as total_amount FROM payments WHERE status = $1',
       ['paid']
@@ -157,9 +167,41 @@ router.get('/stats', authenticateToken, requireRole(['admin']), async (req, res)
     stats.totalPayments = parseInt(paymentStats.rows[0].total)
     stats.totalRevenue = parseFloat(paymentStats.rows[0].total_amount || 0)
 
+    // Monthly revenue
+    const monthlyStats = await pool.query(
+      `SELECT SUM(amount) as monthly_amount FROM payments 
+       WHERE status = $1 AND EXTRACT(MONTH FROM payment_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+       AND EXTRACT(YEAR FROM payment_date) = EXTRACT(YEAR FROM CURRENT_DATE)`,
+      ['paid']
+    )
+    stats.monthlyRevenue = parseFloat(monthlyStats.rows[0].monthly_amount || 0)
+
     res.json(stats)
   } catch (error) {
     console.error('Error fetching stats:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Get earnings overview for admin
+router.get('/earnings', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.id, p.booking_id, p.amount, p.payment_date,
+              b.service_type,
+              u.name as patient_name,
+              pu.name as provider_name
+       FROM payments p
+       JOIN bookings b ON p.booking_id = b.id
+       JOIN users u ON b.patient_id = u.id
+       JOIN users pu ON b.assigned_provider_id = pu.id
+       WHERE p.status = 'paid'
+       ORDER BY p.payment_date DESC`
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching earnings:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })
