@@ -35,22 +35,48 @@ router.post('/register', async (req, res) => {
 
       if (adminCount === 0) {
         // First admin - auto-approve
-        const result = await pool.query(
-          'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
-          [name, email, formattedPhone, hashedPassword, role, 'active']
-        )
-        return res.status(201).json({ 
-          message: 'First admin account created successfully', 
-          user: result.rows[0] 
-        })
+        try {
+          const result = await pool.query(
+            'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+            [name, email, formattedPhone, hashedPassword, role, 'active']
+          )
+          return res.status(201).json({ 
+            message: 'First admin account created successfully', 
+            user: result.rows[0] 
+          })
+        } catch (phoneError) {
+          if (phoneError.message.includes('column "phone"')) {
+            const result = await pool.query(
+              'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
+              [name, email, hashedPassword, role, 'active']
+            )
+            return res.status(201).json({ 
+              message: 'First admin account created successfully', 
+              user: result.rows[0] 
+            })
+          } else {
+            throw phoneError
+          }
+        }
       } else {
         // Subsequent admins - require approval
-        const result = await pool.query(
-          'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
-          [name, email, formattedPhone, hashedPassword, role, 'pending']
-        )
-
-        const user = result.rows[0]
+        try {
+          const result = await pool.query(
+            'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+            [name, email, formattedPhone, hashedPassword, role, 'pending']
+          )
+          var user = result.rows[0]
+        } catch (phoneError) {
+          if (phoneError.message.includes('column "phone"')) {
+            const result = await pool.query(
+              'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
+              [name, email, hashedPassword, role, 'pending']
+            )
+            var user = result.rows[0]
+          } else {
+            throw phoneError
+          }
+        }
 
         // Create admin request
         await pool.query(
@@ -80,12 +106,26 @@ router.post('/register', async (req, res) => {
       userStatus = 'pending'
     }
 
-    const result = await pool.query(
-      'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
-      [name, email, formattedPhone, hashedPassword, role, userStatus]
-    )
-
-    const user = result.rows[0]
+    try {
+      // Try with phone column first
+      const result = await pool.query(
+        'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+        [name, email, formattedPhone, hashedPassword, role, userStatus]
+      )
+      var user = result.rows[0]
+    } catch (phoneError) {
+      // If phone column doesn't exist, try without it
+      if (phoneError.message.includes('column "phone"')) {
+        console.log('Phone column not found, inserting without phone')
+        const result = await pool.query(
+          'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
+          [name, email, hashedPassword, role, userStatus]
+        )
+        var user = result.rows[0]
+      } else {
+        throw phoneError
+      }
+    }
 
     // If provider, insert provider details and create approval request
     if (role === 'provider' && providerType) {
