@@ -8,12 +8,20 @@ const router = express.Router()
 // Register
 router.post('/register', async (req, res) => {
   try {
-    const { name, email, password, role, providerType, requestReason } = req.body
+    const { name, email, phone, password, role, providerType, requestReason } = req.body
 
     // Check if user exists
     const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email])
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ message: 'User already exists' })
+    }
+
+    // Format phone number with +256 prefix if not already present
+    let formattedPhone = phone
+    if (phone && !phone.startsWith('+256')) {
+      // Remove any leading zeros or spaces
+      const cleanPhone = phone.replace(/^0+/, '').replace(/\s+/g, '')
+      formattedPhone = `+256${cleanPhone}`
     }
 
     // Hash password
@@ -28,8 +36,8 @@ router.post('/register', async (req, res) => {
       if (adminCount === 0) {
         // First admin - auto-approve
         const result = await pool.query(
-          'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
-          [name, email, hashedPassword, role, 'active']
+          'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+          [name, email, formattedPhone, hashedPassword, role, 'active']
         )
         return res.status(201).json({ 
           message: 'First admin account created successfully', 
@@ -38,8 +46,8 @@ router.post('/register', async (req, res) => {
       } else {
         // Subsequent admins - require approval
         const result = await pool.query(
-          'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
-          [name, email, hashedPassword, role, 'pending']
+          'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+          [name, email, formattedPhone, hashedPassword, role, 'pending']
         )
 
         const user = result.rows[0]
@@ -65,19 +73,44 @@ router.post('/register', async (req, res) => {
     }
 
     // Regular user registration (patient/provider)
+    let userStatus = 'active'
+    
+    // Providers need admin approval
+    if (role === 'provider') {
+      userStatus = 'pending'
+    }
+
     const result = await pool.query(
-      'INSERT INTO users (name, email, password, role, status) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, status',
-      [name, email, hashedPassword, role, 'active']
+      'INSERT INTO users (name, email, phone, password, role, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, email, phone, role, status',
+      [name, email, formattedPhone, hashedPassword, role, userStatus]
     )
 
     const user = result.rows[0]
 
-    // If provider, insert provider details
+    // If provider, insert provider details and create approval request
     if (role === 'provider' && providerType) {
       await pool.query(
         'INSERT INTO providers (user_id, provider_type) VALUES ($1, $2)',
         [user.id, providerType]
       )
+
+      // Create provider approval request
+      await pool.query(
+        'INSERT INTO admin_requests (user_id, requested_by, request_reason, type) VALUES ($1, $2, $3, $4)',
+        [user.id, name, `Provider registration: ${providerType}`, 'provider_approval']
+      )
+
+      // Notify existing admins about new provider registration
+      await pool.query(
+        `INSERT INTO notifications (user_id, message, type) 
+         SELECT id, $1, 'provider_request' FROM users WHERE role = 'admin' AND status = 'active'`,
+        [`New provider registration from ${name} (${providerType}). Please review and approve.`]
+      )
+
+      return res.status(201).json({ 
+        message: 'Provider application submitted successfully! Your application is pending admin approval. You will be notified once approved.',
+        user: { ...user, needsApproval: true }
+      })
     }
 
     res.status(201).json({ message: 'User registered successfully', user })

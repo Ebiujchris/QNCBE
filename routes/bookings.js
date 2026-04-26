@@ -7,13 +7,13 @@ const router = express.Router()
 // Create booking (patients only)
 router.post('/', authenticateToken, requireRole(['patient']), async (req, res) => {
   try {
-    const { serviceType, description, location, preferredDate, urgency } = req.body
+    const { serviceType, description, location, phoneNumber, preferredDate, urgency } = req.body
     const patientId = req.user.id
 
     const result = await pool.query(
-      `INSERT INTO bookings (patient_id, service_type, description, location, preferred_date, urgency, status) 
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING *`,
-      [patientId, serviceType, description, location, preferredDate, urgency || 'normal']
+      `INSERT INTO bookings (patient_id, service_type, description, location, phone_number, preferred_date, urgency, status) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending') RETURNING *`,
+      [patientId, serviceType, description, location, phoneNumber, preferredDate, urgency || 'normal']
     )
 
     const booking = result.rows[0]
@@ -39,6 +39,7 @@ router.get('/my-bookings', authenticateToken, requireRole(['patient']), async (r
       `SELECT b.*, 
               u.name as assigned_provider_name, 
               u.email as assigned_provider_email,
+              u.phone as assigned_provider_phone,
               p.provider_type as assigned_provider_type
        FROM bookings b
        LEFT JOIN users u ON b.assigned_provider_id = u.id
@@ -53,6 +54,7 @@ router.get('/my-bookings', authenticateToken, requireRole(['patient']), async (r
       assignedProvider: booking.assigned_provider_name ? {
         name: booking.assigned_provider_name,
         email: booking.assigned_provider_email,
+        phone: booking.assigned_provider_phone,
         providerType: booking.assigned_provider_type
       } : null
     }))
@@ -68,7 +70,7 @@ router.get('/my-bookings', authenticateToken, requireRole(['patient']), async (r
 router.get('/my-assignments', authenticateToken, requireRole(['provider']), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT b.*, u.name as patient_name, u.email as patient_email
+      `SELECT b.*, u.name as patient_name, u.email as patient_email, u.phone as patient_phone
        FROM bookings b
        JOIN users u ON b.patient_id = u.id
        WHERE b.assigned_provider_id = $1 

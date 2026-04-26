@@ -10,6 +10,15 @@ BEGIN
     END IF;
 END $$;
 
+-- Add phone_number column to bookings table if it doesn't exist
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'bookings' AND column_name = 'phone_number') THEN
+        ALTER TABLE bookings ADD COLUMN phone_number VARCHAR(20) DEFAULT '';
+    END IF;
+END $$;
+
 -- Update existing payments table to ensure proper constraints
 ALTER TABLE payments ALTER COLUMN amount SET DEFAULT 0.00;
 

@@ -213,13 +213,90 @@ router.get('/admin-requests', authenticateToken, requireRole(['admin']), async (
       `SELECT ar.*, u.name, u.email, u.created_at as user_created_at
        FROM admin_requests ar
        JOIN users u ON ar.user_id = u.id
-       WHERE ar.status = 'pending'
+       WHERE ar.status = 'pending' AND ar.type = 'admin_request'
        ORDER BY ar.created_at ASC`
     )
 
     res.json(result.rows)
   } catch (error) {
     console.error('Error fetching admin requests:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Get pending provider approvals
+router.get('/provider-requests', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT ar.*, u.name, u.email, u.phone, u.location, u.created_at as user_created_at,
+              p.provider_type, p.availability
+       FROM admin_requests ar
+       JOIN users u ON ar.user_id = u.id
+       JOIN providers p ON u.id = p.user_id
+       WHERE ar.status = 'pending' AND ar.type = 'provider_approval'
+       ORDER BY ar.created_at ASC`
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching provider requests:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Approve/Reject provider request
+router.post('/provider-requests/:id/:action', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const requestId = req.params.id
+    const action = req.params.action // 'approve' or 'reject'
+    
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ message: 'Invalid action' })
+    }
+
+    // Get the request
+    const requestResult = await pool.query(
+      'SELECT * FROM admin_requests WHERE id = $1 AND type = $2',
+      [requestId, 'provider_approval']
+    )
+
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Provider request not found' })
+    }
+
+    const providerRequest = requestResult.rows[0]
+
+    // Update request status
+    await pool.query(
+      'UPDATE admin_requests SET status = $1, approved_by = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3',
+      [action === 'approve' ? 'approved' : 'rejected', req.user.id, requestId]
+    )
+
+    if (action === 'approve') {
+      // Activate the provider
+      await pool.query(
+        'UPDATE users SET status = $1 WHERE id = $2',
+        ['active', providerRequest.user_id]
+      )
+
+      // Notify the provider
+      await pool.query(
+        'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
+        [providerRequest.user_id, 'Congratulations! Your provider application has been approved. You can now login and start receiving assignments.', 'provider_approved']
+      )
+
+      res.json({ message: 'Provider approved successfully' })
+    } else {
+      // Notify the provider of rejection
+      await pool.query(
+        'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
+        [providerRequest.user_id, 'Your provider application has been rejected. Contact support for more information.', 'provider_rejected']
+      )
+
+      res.json({ message: 'Provider application rejected' })
+    }
+  } catch (error) {
+    console.error('Error processing provider request:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })
