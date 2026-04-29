@@ -88,43 +88,51 @@ router.get('/providers', authenticateToken, requireRole(['admin']), async (req, 
 router.post('/bookings/:id/assign', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const bookingId = req.params.id
-    const { providerId, price } = req.body
+    const { providerId, ratePerDay, days } = req.body
 
-    if (!providerId || !price || price <= 0) {
-      return res.status(400).json({ message: 'Provider ID and valid price are required' })
-    }
+    const parsedDays = parseInt(days)
+    const parsedRate = parseFloat(ratePerDay)
 
-    // Update booking with provider and price
+    if (!providerId) return res.status(400).json({ message: 'Provider ID is required' })
+    if (!parsedRate || parsedRate <= 0) return res.status(400).json({ message: 'Valid rate per day is required' })
+    if (!parsedDays || parsedDays <= 0) return res.status(400).json({ message: 'Valid number of days is required' })
+
+    const totalPrice = parsedRate * parsedDays
+
     const result = await pool.query(
-      'UPDATE bookings SET assigned_provider_id = $1, price = $2, status = $3 WHERE id = $4 RETURNING *',
-      [providerId, price, 'assigned', bookingId]
+      `UPDATE bookings 
+       SET assigned_provider_id = $1, price = $2, rate_per_day = $3, days = $4, status = $5 
+       WHERE id = $6 RETURNING *`,
+      [providerId, totalPrice, parsedRate, parsedDays, 'assigned', bookingId]
     )
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Booking not found' })
-    }
+    if (result.rows.length === 0) return res.status(404).json({ message: 'Booking not found' })
 
     const booking = result.rows[0]
 
     // Create payment record
     await pool.query(
       'INSERT INTO payments (booking_id, amount, status) VALUES ($1, $2, $3)',
-      [bookingId, price, 'unpaid']
+      [bookingId, totalPrice, 'unpaid']
     )
 
     // Notify patient
     await pool.query(
       'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
-      [booking.patient_id, `A provider has been assigned to your ${booking.service_type} service request. Service fee: UGX ${parseFloat(price).toLocaleString()}`, 'provider_assigned']
+      [booking.patient_id, 
+       `A provider has been assigned to your ${booking.service_type} service. Rate: UGX ${parsedRate.toLocaleString()}/day × ${parsedDays} day(s) = UGX ${totalPrice.toLocaleString()} total.`,
+       'provider_assigned']
     )
 
     // Notify provider
     await pool.query(
       'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
-      [providerId, `You have been assigned a new ${booking.service_type} service. Fee: UGX ${parseFloat(price).toLocaleString()}`, 'assignment_received']
+      [providerId, 
+       `You have been assigned a new ${booking.service_type} service for ${parsedDays} day(s) at UGX ${parsedRate.toLocaleString()}/day. Total: UGX ${totalPrice.toLocaleString()}.`,
+       'assignment_received']
     )
 
-    res.json(booking)
+    res.json({ ...booking, totalPrice })
   } catch (error) {
     console.error('Error assigning provider:', error)
     res.status(500).json({ message: 'Server error' })
@@ -159,13 +167,28 @@ router.get('/stats', authenticateToken, requireRole(['admin']), async (req, res)
       return acc
     }, {})
 
-    // Total payments and revenue
+    // Total payments and revenue — sum from paid payments
     const paymentStats = await pool.query(
-      'SELECT COUNT(*) as total, SUM(amount) as total_amount FROM payments WHERE status = $1',
-      ['paid']
+      `SELECT COUNT(*) as total, COALESCE(SUM(p.amount), 0) as total_amount 
+       FROM payments p WHERE p.status = 'paid'`
     )
     stats.totalPayments = parseInt(paymentStats.rows[0].total)
-    stats.totalRevenue = parseFloat(paymentStats.rows[0].total_amount || 0)
+    stats.totalRevenue = parseFloat(paymentStats.rows[0].total_amount)
+
+    // Per-patient revenue breakdown
+    const perPatientStats = await pool.query(
+      `SELECT u.name as patient_name, u.email as patient_email,
+              COUNT(b.id) as booking_count,
+              COALESCE(SUM(b.price), 0) as total_billed,
+              COALESCE(SUM(CASE WHEN p.status = 'paid' THEN p.amount ELSE 0 END), 0) as total_paid
+       FROM users u
+       JOIN bookings b ON u.id = b.patient_id
+       LEFT JOIN payments p ON b.id = p.booking_id
+       WHERE u.role = 'patient'
+       GROUP BY u.id, u.name, u.email
+       ORDER BY total_billed DESC`
+    )
+    stats.perPatientRevenue = perPatientStats.rows
 
     // Monthly revenue
     const monthlyStats = await pool.query(
@@ -228,8 +251,10 @@ router.get('/admin-requests', authenticateToken, requireRole(['admin']), async (
 router.get('/provider-requests', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT ar.*, u.name, u.email, u.phone, u.location, u.created_at as user_created_at,
-              p.provider_type, p.availability
+      `SELECT ar.*, u.name, u.email, u.phone, u.created_at as user_created_at,
+              p.provider_type, p.availability, p.experience, p.qualifications,
+              p.license_number, p.bio, p.location,
+              p.doc_license_url, p.doc_certificate_url, p.doc_cv_url
        FROM admin_requests ar
        JOIN users u ON ar.user_id = u.id
        JOIN providers p ON u.id = p.user_id
