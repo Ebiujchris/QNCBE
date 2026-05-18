@@ -88,22 +88,24 @@ router.get('/providers', authenticateToken, requireRole(['admin']), async (req, 
 router.post('/bookings/:id/assign', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const bookingId = req.params.id
-    const { providerId, ratePerDay, days } = req.body
+    const { providerId, ratePerDay, days, providerPayment } = req.body
 
     const parsedDays = parseInt(days)
     const parsedRate = parseFloat(ratePerDay)
+    const parsedProviderPayment = parseFloat(providerPayment)
 
     if (!providerId) return res.status(400).json({ message: 'Provider ID is required' })
     if (!parsedRate || parsedRate <= 0) return res.status(400).json({ message: 'Valid rate per day is required' })
     if (!parsedDays || parsedDays <= 0) return res.status(400).json({ message: 'Valid number of days is required' })
+    if (!parsedProviderPayment || parsedProviderPayment <= 0) return res.status(400).json({ message: 'Valid provider payment is required' })
 
     const totalPrice = parsedRate * parsedDays
 
     const result = await pool.query(
       `UPDATE bookings 
-       SET assigned_provider_id = $1, price = $2, rate_per_day = $3, days = $4, status = $5 
-       WHERE id = $6 RETURNING *`,
-      [providerId, totalPrice, parsedRate, parsedDays, 'assigned', bookingId]
+       SET assigned_provider_id = $1, price = $2, rate_per_day = $3, days = $4, provider_payment = $5, status = $6 
+       WHERE id = $7 RETURNING *`,
+      [providerId, totalPrice, parsedRate, parsedDays, parsedProviderPayment, 'assigned', bookingId]
     )
 
     if (result.rows.length === 0) return res.status(404).json({ message: 'Booking not found' })
@@ -124,11 +126,11 @@ router.post('/bookings/:id/assign', authenticateToken, requireRole(['admin']), a
        'provider_assigned']
     )
 
-    // Notify provider
+    // Notify provider with their payment amount
     await pool.query(
       'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
       [providerId, 
-       `You have been assigned a new ${booking.service_type} service for ${parsedDays} day(s) at UGX ${parsedRate.toLocaleString()}/day. Total: UGX ${totalPrice.toLocaleString()}.`,
+       `You have been assigned a new ${booking.service_type} service for ${parsedDays} day(s). You will receive UGX ${parsedProviderPayment.toLocaleString()}.`,
        'assignment_received']
     )
 
@@ -379,6 +381,161 @@ router.post('/admin-requests/:id/:action', authenticateToken, requireRole(['admi
     }
   } catch (error) {
     console.error('Error processing admin request:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Send system notifications
+router.post('/notifications/send', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const { recipientType, customUserId, message, notificationType } = req.body
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ message: 'Message is required' })
+    }
+
+    let userIds = []
+
+    if (recipientType === 'custom') {
+      if (!customUserId) {
+        return res.status(400).json({ message: 'User ID is required for custom notifications' })
+      }
+      userIds = [customUserId]
+    } else if (recipientType === 'all') {
+      const result = await pool.query('SELECT id FROM users WHERE status = $1', ['active'])
+      userIds = result.rows.map(row => row.id)
+    } else {
+      // recipientType is a role (patient, provider, admin)
+      const result = await pool.query(
+        'SELECT id FROM users WHERE role = $1 AND status = $2',
+        [recipientType, 'active']
+      )
+      userIds = result.rows.map(row => row.id)
+    }
+
+    if (userIds.length === 0) {
+      return res.status(400).json({ message: 'No recipients found' })
+    }
+
+    // Insert notifications for all recipients
+    const values = userIds.map(userId => `(${userId}, '${message.replace(/'/g, "''")}', '${notificationType || 'general'}')`).join(',')
+    await pool.query(
+      `INSERT INTO notifications (user_id, message, type) VALUES ${values}`
+    )
+
+    res.json({ 
+      message: 'Notifications sent successfully',
+      recipientCount: userIds.length
+    })
+  } catch (error) {
+    console.error('Error sending notifications:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Get all users (for suspension management)
+router.get('/users/all', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, email, role, status, created_at, updated_at
+       FROM users
+       ORDER BY created_at DESC`
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching all users:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Suspend user
+router.post('/users/:id/suspend', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const userId = req.params.id
+
+    // Prevent admin from suspending themselves
+    if (parseInt(userId) === req.user.id) {
+      return res.status(400).json({ message: 'You cannot suspend yourself' })
+    }
+
+    const result = await pool.query(
+      'UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      ['suspended', userId]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    const user = result.rows[0]
+
+    // Notify the user
+    await pool.query(
+      'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
+      [userId, 'Your account has been suspended. Please contact support for more information.', 'account_suspended']
+    )
+
+    res.json({ message: `User ${user.name} has been suspended`, user })
+  } catch (error) {
+    console.error('Error suspending user:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Activate user
+router.post('/users/:id/activate', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const userId = req.params.id
+
+    const result = await pool.query(
+      'UPDATE users SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+      ['active', userId]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    const user = result.rows[0]
+
+    // Notify the user
+    await pool.query(
+      'INSERT INTO notifications (user_id, message, type) VALUES ($1, $2, $3)',
+      [userId, 'Your account has been reactivated. You can now login and use the platform.', 'account_activated']
+    )
+
+    res.json({ message: `User ${user.name} has been activated`, user })
+  } catch (error) {
+    console.error('Error activating user:', error)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Delete user
+router.delete('/users/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const userId = req.params.id
+
+    // Prevent admin from deleting themselves
+    if (parseInt(userId) === req.user.id) {
+      return res.status(400).json({ message: 'You cannot delete yourself' })
+    }
+
+    const result = await pool.query(
+      'DELETE FROM users WHERE id = $1 RETURNING *',
+      [userId]
+    )
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    const user = result.rows[0]
+
+    res.json({ message: `User ${user.name} has been permanently deleted` })
+  } catch (error) {
+    console.error('Error deleting user:', error)
     res.status(500).json({ message: 'Server error' })
   }
 })

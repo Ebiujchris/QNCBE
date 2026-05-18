@@ -101,13 +101,21 @@ router.get('/my-assignments', authenticateToken, requireRole(['provider']), asyn
     
     let query
     if (hasPhoneColumn) {
-      query = `SELECT b.*, u.name as patient_name, u.email as patient_email, u.phone as patient_phone
+      query = `SELECT b.id, b.patient_id, b.service_type, b.description, b.location, 
+              b.phone_number, b.preferred_date, b.urgency, b.status, 
+              b.assigned_provider_id, b.provider_payment as price, b.rate_per_day, b.days,
+              b.created_at, b.updated_at,
+              u.name as patient_name, u.email as patient_email, COALESCE(b.phone_number, u.phone) as patient_phone
        FROM bookings b
        JOIN users u ON b.patient_id = u.id
        WHERE b.assigned_provider_id = $1 
        ORDER BY b.created_at DESC`
     } else {
-      query = `SELECT b.*, u.name as patient_name, u.email as patient_email
+      query = `SELECT b.id, b.patient_id, b.service_type, b.description, b.location, 
+              b.phone_number, b.preferred_date, b.urgency, b.status, 
+              b.assigned_provider_id, b.provider_payment as price, b.rate_per_day, b.days,
+              b.created_at, b.updated_at,
+              u.name as patient_name, u.email as patient_email, b.phone_number as patient_phone
        FROM bookings b
        JOIN users u ON b.patient_id = u.id
        WHERE b.assigned_provider_id = $1 
@@ -162,7 +170,7 @@ router.post('/:id/complete', authenticateToken, requireRole(['provider']), async
 router.get('/provider/earnings', authenticateToken, requireRole(['provider']), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT p.id, p.booking_id, p.amount, p.payment_date,
+      `SELECT p.id, p.booking_id, b.provider_payment as amount, p.payment_date,
               b.service_type,
               u.name as patient_name
        FROM payments p
